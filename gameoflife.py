@@ -1,9 +1,13 @@
 import tkinter as tk
 from tkinter import filedialog
 from tkinter.messagebox import showerror
+from PIL import Image
+
 from time import sleep, time
 import math
 from collections import deque
+from enum import Enum
+import os
 
 FPS = 30
 CANVAS_SIZE = (1000, 800)
@@ -11,6 +15,79 @@ UPDATE_FREQS = [0.5, 0.25, 0.125, 0.06, 0.03]
 MAX_CELLSIZE = 100
 ZOOM_FREQ = 0.5
 UNDO_HISTORY_LENGTH = 1000
+
+class BrushType(Enum):
+    default = 0 # has no mask
+    plus = 1
+    small_ship = 2
+    glider_gun = 3
+
+    # size of enum is manually updated
+    SIZE = 4
+
+BrushMasks = [None for i in range(BrushType.SIZE.value)]
+
+def loadBrushMasks():
+    rootdir = os.path.split(os.path.abspath(__file__))[0] + '/brushmasks/'
+    for root, dirs, files in os.walk(rootdir):
+        for filename in files:
+            try:
+                im = Image.open(f"{rootdir}/{filename}")
+                pixels = im.load()
+            except Exception as e:
+                print("loadBrushMasks:", e)
+                continue
+            mask = []
+            for i in range(im.size[0]):
+                mask.append([])
+                for j in range(im.size[1]):
+                    if pixels[i,j][0] == 0: # black
+                        mask[i].append(1)
+                    else:
+                        mask[i].append(0)
+            try:
+                BrushMasks[BrushType[filename.split('.')[0]].value] = mask
+            except Exception as e:
+                print("loadBrushMasks:", e)
+
+def rotateMatrix(mat):
+    if not len(mat): return
+    top = 0
+    bottom = len(mat)-1
+    left = 0
+    right = len(mat[0])-1
+    while left < right and top < bottom:
+        # Store the first element of next row, this element will replace first element of current row
+        prev = mat[top+1][left]
+
+        # Move elements of top row one step right
+        for i in range(left, right+1):
+            curr = mat[top][i]
+            mat[top][i] = prev
+            prev = curr
+        top += 1
+
+        # Move elements of rightmost column one step downwards
+        for i in range(top, bottom+1):
+            curr = mat[i][right]
+            mat[i][right] = prev
+            prev = curr
+        right -= 1
+
+        # Move elements of bottom row one step left
+        for i in range(right, left-1, -1):
+            curr = mat[bottom][i]
+            mat[bottom][i] = prev
+            prev = curr
+        bottom -= 1
+
+        # Move elements of leftmost column one step upwards
+        for i in range(bottom, top-1, -1):
+            curr = mat[i][left]
+            mat[i][left] = prev
+            prev = curr
+        left += 1
+    return mat
 
 class GameState():
     def __init__(self):
@@ -56,13 +133,17 @@ class SavedState():
     def __init__(self, cells):
         self.cells = cells
 
+
 class Application(tk.Frame):
     def __init__(self, master=None):
         tk.Frame.__init__(self, master)
         self.grid(padx=5, pady=5)
 
         self.cellsize = 3
+        self.brushtype = BrushType.default
+        self.curBrushMask = None
         self.brushsize = 1
+        self.brushrot = 0
         self.cell_rectangles = {}
         self.gamestate = GameState()
         self.lastSavedState = None
@@ -98,13 +179,21 @@ class Application(tk.Frame):
 
     ### Input ###
     def leftClick(self, cell):
-        if self.brushsize == 1:
-            self.interfaceAddCell(cell)
+        if self.brushtype == BrushType.default:
+            if self.brushsize == 1:
+                self.interfaceAddCell(cell)
+            else:
+                halfbs = math.ceil(self.brushsize / 2)
+                for i in range(-halfbs + (1 if self.brushsize % 2 else 0), halfbs):
+                    for j in range(-halfbs + (1 if self.brushsize % 2 else 0), halfbs):
+                        self.interfaceAddCell((cell[0] + i, cell[1] + j))
         else:
-            halfbs = math.ceil(self.brushsize / 2)
-            for i in range(-halfbs + (1 if self.brushsize % 2 else 0), halfbs):
-                for j in range(-halfbs + (1 if self.brushsize % 2 else 0), halfbs):
-                    self.interfaceAddCell((cell[0] + i, cell[1] + j))
+            halfwidth = int(len(self.curBrushMask) / 2)
+            halfheight = int(len(self.curBrushMask[0]) / 2)
+            for i in range(len(self.curBrushMask)):
+                for j in range(len(self.curBrushMask[0])):
+                    if self.curBrushMask[i][j]:
+                        self.interfaceAddCell((cell[0] + i - halfwidth, cell[1] + j - halfheight))
 
     def leftClickedCanvasCallback(self, event):
         i = math.floor(event.x / self.cellsize) - self.viewOffset[0]
@@ -245,43 +334,64 @@ class Application(tk.Frame):
         self.brushsize -= 1
         self.updateBrushSizeLabel()
 
-    def selectDefaultBrush(self):
+    def updateBrushRotLabel(self):
+        self.brushRotVar.set(f"Brush rotation: {self.brushrot}")
+
+    def rotateBrushLeft(self):
+        if self.brushtype not in [BrushType.small_ship]: return
+        self.brushrot -= 90
+        if self.brushrot < 0:
+            self.brushrot = 270
+        self.curBrushMask = rotateMatrix(rotateMatrix(self.curBrushMask))
+        self.updateBrushRotLabel()
+
+    def rotateBrushRight(self):
         pass
+        #self.brushrot += 90
+        #if self.brushrot >= 360:
+        #    self.brushrot = 0
+        #self.updateBrushRotLabel()
+
+    def selectBrush(self, brush):
+        self.brushtype = brush
+        self.brushrot = 0
+        self.updateBrushRotLabel()
+        self.curBrushMask = BrushMasks[self.brushtype.value]
 
     ### Init ###
     def createWidgets(self):
-        self.quitButton = tk.Button(self, text='Quit', command=self.quit, width=10)
-        self.quitButton.grid(row=0, column=0, sticky="NW")
+        quitButton = tk.Button(self, text='Quit', command=self.quit, width=10)
+        quitButton.grid(row=0, column=0, sticky="NW")
 
-        self.gameControlFrame = tk.Frame(self)
-        self.gameControlFrame.grid(row=0, column=1, sticky="NE")
-        self.startButton = tk.Button(self.gameControlFrame, text='Start/Pause', command=self.toggleGameUpdates, width=10)
-        self.startButton.grid(row=0, column=0)
-        self.stepButton = tk.Button(self.gameControlFrame, text='Step', command=self.manualStep, width=10)
-        self.stepButton.grid(row=0, column=1)
-        self.stepButton = tk.Button(self.gameControlFrame, text='Step back', command=self.manualStepBack, width=10)
-        self.stepButton.grid(row=0, column=2)
+        gameControlFrame = tk.Frame(self)
+        gameControlFrame.grid(row=0, column=1, sticky="NE")
+        startButton = tk.Button(gameControlFrame, text='Start/Pause', command=self.toggleGameUpdates, width=10)
+        startButton.grid(row=0, column=0)
+        stepButton = tk.Button(gameControlFrame, text='Step', command=self.manualStep, width=10)
+        stepButton.grid(row=0, column=1)
+        stepBackButton = tk.Button(gameControlFrame, text='Step back', command=self.manualStepBack, width=10)
+        stepBackButton.grid(row=0, column=2)
         self.speedStringVar = tk.StringVar()
         self.updateSpeedLabel()
-        self.speedLabel = tk.Label(self.gameControlFrame, textvariable=self.speedStringVar)
-        self.speedLabel.grid(row=1, column=0)
-        self.speedDecreaseButton = tk.Button(self.gameControlFrame, text='Slower', command=self.decreaseSpeed, width=10)
-        self.speedDecreaseButton.grid(row=1, column=1)
-        self.speedIncreaseButton = tk.Button(self.gameControlFrame, text='Faster', command=self.increaseSpeed, width=10)
-        self.speedIncreaseButton.grid(row=1, column=2)
+        speedLabel = tk.Label(gameControlFrame, textvariable=self.speedStringVar)
+        speedLabel.grid(row=1, column=0)
+        speedDecreaseButton = tk.Button(gameControlFrame, text='Slower', command=self.decreaseSpeed, width=10)
+        speedDecreaseButton.grid(row=1, column=1)
+        speedIncreaseButton = tk.Button(gameControlFrame, text='Faster', command=self.increaseSpeed, width=10)
+        speedIncreaseButton.grid(row=1, column=2)
 
-        self.stateControlFrame = tk.Frame(self)
-        self.stateControlFrame.grid(row=0, column=2, sticky="E")
-        self.saveButton = tk.Button(self.stateControlFrame, text='Quicksave', command=self.saveState, width=10)
-        self.saveButton.grid(row=0, column=0)
-        self.loadButton = tk.Button(self.stateControlFrame, text='Load quicksave', command=self.loadState, width=10)
-        self.loadButton.grid(row=0, column=1)
-        self.loadButton = tk.Button(self.stateControlFrame, text='Clear state', command=self.clearState, width=10)
-        self.loadButton.grid(row=0, column=2)
-        self.saveToFileButton = tk.Button(self.stateControlFrame, text='Save to file', command=self.saveStateToFile, width=10)
-        self.saveToFileButton.grid(row=1, column=0)
-        self.saveToFileButton = tk.Button(self.stateControlFrame, text='Load from file', command=self.loadStateFromFile, width=10)
-        self.saveToFileButton.grid(row=1, column=1)
+        stateControlFrame = tk.Frame(self)
+        stateControlFrame.grid(row=0, column=2, sticky="E")
+        saveButton = tk.Button(stateControlFrame, text='Quicksave', command=self.saveState, width=10)
+        saveButton.grid(row=0, column=0)
+        loadButton = tk.Button(stateControlFrame, text='Load quicksave', command=self.loadState, width=10)
+        loadButton.grid(row=0, column=1)
+        clearButton = tk.Button(stateControlFrame, text='Clear state', command=self.clearState, width=10)
+        clearButton.grid(row=0, column=2)
+        saveToFileButton = tk.Button(stateControlFrame, text='Save to file', command=self.saveStateToFile, width=10)
+        saveToFileButton.grid(row=1, column=0)
+        loadFromFileButton = tk.Button(stateControlFrame, text='Load from file', command=self.loadStateFromFile, width=10)
+        loadFromFileButton.grid(row=1, column=1)
 
         self.canvas = tk.Canvas(self, width=CANVAS_SIZE[0], height=CANVAS_SIZE[1], bg='black', bd=2, relief="groove")
         self.canvas.bind("<Button-1>", self.leftClickedCanvasCallback)
@@ -294,25 +404,43 @@ class Application(tk.Frame):
         self.canvas.focus_set()
         self.canvas.grid(row=1, column=0, columnspan=3)
 
-        self.brushFrame = tk.Frame(self)
-        self.brushFrame.grid(row=1, column=3, sticky="NW")
-        self.brushSizeFrame = tk.Frame(self.brushFrame)
-        self.brushSizeFrame.grid(row=0, column=0, sticky="NW", pady=20)
+        brushFrame = tk.Frame(self, width=50)
+        brushFrame.grid(row=1, column=3, sticky="NW")
+
+        brushSizeFrame = tk.Frame(brushFrame)
+        brushSizeFrame.grid(row=0, column=0, sticky="NW", pady=(0, 20))
         self.brushSizeVar = tk.StringVar()
         self.updateBrushSizeLabel()
-        self.brushSizeLabel = tk.Label(self.brushSizeFrame, textvariable=self.brushSizeVar)
-        self.brushSizeLabel.grid(row=0, column=0, columnspan=2, sticky='W')
-        self.decreaseBrushSizeButton = tk.Button(self.brushSizeFrame, text='-', command=self.decreaseBrushSize, width=2)
-        self.decreaseBrushSizeButton.grid(row=1, column=0)
-        self.increaseBrushSizeButton = tk.Button(self.brushSizeFrame, text='+', command=self.increaseBrushSize, width=2)
-        self.increaseBrushSizeButton.grid(row=1, column=1)
-        self.defaultBrushButton = tk.Button(self.brushFrame, text='Default brush', command=self.selectDefaultBrush, width=10)
-        self.defaultBrushButton.grid(row=1, column=0, columnspan=2)
+        brushSizeLabel = tk.Label(brushSizeFrame, textvariable=self.brushSizeVar, anchor="w", width=20)
+        brushSizeLabel.grid(row=0, column=0, columnspan=2, sticky='W')
+        decreaseBrushSizeButton = tk.Button(brushSizeFrame, text='-', command=self.decreaseBrushSize, width=4)
+        decreaseBrushSizeButton.grid(row=1, column=0, sticky="W")
+        increaseBrushSizeButton = tk.Button(brushSizeFrame, text='+', command=self.increaseBrushSize, width=4)
+        increaseBrushSizeButton.grid(row=1, column=1, sticky="W")
 
-        #self.menuBar = tk.Menu(self.master)
-        #self.menuBar.add_command(label="Save")
-        #self.master.config(menu=self.menuBar)
+        brushRotFrame = tk.Frame(brushFrame)
+        brushRotFrame.grid(row=1, column=0, sticky="NW", pady=(0, 20))
+        self.brushRotVar = tk.StringVar()
+        self.updateBrushRotLabel()
+        brushRotLabel = tk.Label(brushRotFrame, textvariable=self.brushRotVar, anchor="w", width=20)
+        brushRotLabel.grid(row=0, column=0, columnspan=2, sticky='W')
+        rotateBrushLeftButton = tk.Button(brushRotFrame, text='<-', command=self.rotateBrushLeft, width=4)
+        rotateBrushLeftButton.grid(row=1, column=0, sticky='W')
+        rotateBrushRightButton = tk.Button(brushRotFrame, text='->', command=self.rotateBrushRight, width=4)
+        rotateBrushRightButton.grid(row=1, column=1, sticky="W")
 
+        brushTypeFrame = tk.Frame(brushFrame)
+        brushTypeFrame.grid(row=2, column=0, sticky="NW")
+        brushLabel = tk.Label(brushTypeFrame, text="Brushes:", anchor="w", width=20)
+        brushLabel.grid(row=0, column=0, sticky="W")
+        defaultBrushButton = tk.Button(brushTypeFrame, text='Default brush', command=lambda: self.selectBrush(BrushType.default), width=12)
+        defaultBrushButton.grid(row=1, column=0, columnspan=2, sticky="W")
+        plusBrushButton = tk.Button(brushTypeFrame, text='Plus', command=lambda: self.selectBrush(BrushType.plus), width=12)
+        plusBrushButton.grid(row=2, column=0, columnspan=2, sticky="W")
+        smallshipBrushButton = tk.Button(brushTypeFrame, text='Small spaceship', command=lambda: self.selectBrush(BrushType.small_ship), width=12)
+        smallshipBrushButton.grid(row=3, column=0, columnspan=2, sticky="W")
+        glidergunBrushButton = tk.Button(brushTypeFrame, text='Glider gun', command=lambda: self.selectBrush(BrushType.glider_gun), width=12)
+        glidergunBrushButton.grid(row=4, column=0, columnspan=2, sticky="W")
 
     ### Drawing ###
     def refreshView(self, drawGrid=True):
@@ -367,6 +495,7 @@ class Application(tk.Frame):
             i += self.cellsize
 
 if __name__ == "__main__":
+    loadBrushMasks()
     root = tk.Tk()
     app = Application(root)
     app.master.title("Game of Life")
