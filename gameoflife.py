@@ -11,7 +11,7 @@ import os
 
 FPS = 30
 CANVAS_SIZE = (1000, 800)
-UPDATE_FREQS = [0.5, 0.25, 0.125, 0.06, 0.03]
+UPDATE_FREQS = [500, 250, 125, 60, 30]
 MAX_CELLSIZE = 100
 ZOOM_FREQ = 0.5
 UNDO_HISTORY_LENGTH = 1000
@@ -19,11 +19,19 @@ UNDO_HISTORY_LENGTH = 1000
 class BrushType(Enum):
     default = 0 # has no mask
     plus = 1
-    small_ship = 2
-    glider_gun = 3
+    blinker = 2
+    toad = 3
+    beacon = 4
+    pulsar = 5
+    portal = 6
+    glider = 7
+    gosper_glider_gun = 8
+    simkin_glider_gun = 9
+    light_ship = 10
+    heavy_ship = 11
 
     # size of enum is manually updated
-    SIZE = 4
+    SIZE = 12
 
 BrushMasks = [None for i in range(BrushType.SIZE.value)]
 
@@ -50,49 +58,29 @@ def loadBrushMasks():
             except Exception as e:
                 print("loadBrushMasks:", e)
 
-def rotateMatrix(mat):
-    if not len(mat): return
-    top = 0
-    bottom = len(mat)-1
-    left = 0
-    right = len(mat[0])-1
-    while left < right and top < bottom:
-        # Store the first element of next row, this element will replace first element of current row
-        prev = mat[top+1][left]
-
-        # Move elements of top row one step right
-        for i in range(left, right+1):
-            curr = mat[top][i]
-            mat[top][i] = prev
-            prev = curr
-        top += 1
-
-        # Move elements of rightmost column one step downwards
-        for i in range(top, bottom+1):
-            curr = mat[i][right]
-            mat[i][right] = prev
-            prev = curr
-        right -= 1
-
-        # Move elements of bottom row one step left
-        for i in range(right, left-1, -1):
-            curr = mat[bottom][i]
-            mat[bottom][i] = prev
-            prev = curr
-        bottom -= 1
-
-        # Move elements of leftmost column one step upwards
-        for i in range(bottom, top-1, -1):
-            curr = mat[i][left]
-            mat[i][left] = prev
-            prev = curr
-        left += 1
-    return mat
+def rotate(mat, left):
+    if left:
+        outer = range(len(mat[0]))
+        inner = range(len(mat)-1, -1, -1)
+    else:
+        outer = range(len(mat[0])-1, -1, -1)
+        inner = range(len(mat))
+    res = []
+    for i in outer:
+        inn_res = []
+        for j in inner:
+            inn_res.append(mat[j][i])
+        res.append(inn_res)
+    return res
 
 class GameState():
     def __init__(self):
         self.cells = []
         self.running = False
+
+        self.underpopulationRule = 2
+        self.overpopulationRule = 3
+        self.rebornRule = 3
 
     def updateCells(self):
         self.cells = list(set(self.cells)) # remove dups
@@ -127,12 +115,11 @@ class GameState():
                             self.potential_cells[(i, j)] = 1
 
     def generationStep(self, count, alive):
-        return (alive and count >= 2 and count <= 3) or ((not alive) and count == 3)
+        return (alive and count >= self.underpopulationRule and count <= self.overpopulationRule) or ((not alive) and count == self.rebornRule)
 
 class SavedState():
     def __init__(self, cells):
         self.cells = cells
-
 
 class Application(tk.Frame):
     def __init__(self, master=None):
@@ -152,8 +139,9 @@ class Application(tk.Frame):
         self.viewOffset = (0, 0)
 
         self.update_freq_idx = 0
-        self.lastUpdate = time()
         self.lastZoom = 0
+
+        self.showingRulesPopup = False
 
         self.master.protocol("WM_DELETE_WINDOW", self.quit)
         self.createWidgets()
@@ -170,12 +158,9 @@ class Application(tk.Frame):
         self.addNewCells()
 
     def updateLoop(self):
-        self.after(1000 // FPS, self.updateLoop)
+        self.after(UPDATE_FREQS[self.update_freq_idx], self.updateLoop)
         if self.gamestate.running:
-            now = time()
-            if now - self.lastUpdate >= UPDATE_FREQS[self.update_freq_idx]:
-                self.lastUpdate = now
-                self.updateStep()
+            self.updateStep()
 
     ### Input ###
     def leftClick(self, cell):
@@ -200,7 +185,7 @@ class Application(tk.Frame):
         j = math.floor(event.y / self.cellsize) - self.viewOffset[1]
         self.leftClick((i, j))
 
-    def rightClick(self, cell):
+    def deleteCell(self, cell):
         try:
             self.gamestate.cells.remove(cell)
         except ValueError:
@@ -210,6 +195,15 @@ class Application(tk.Frame):
             del self.cell_rectangles[cell]
         except KeyError:
             pass
+
+    def rightClick(self, cell):
+        if self.brushsize == 1:
+            self.deleteCell(cell)
+        else:
+            halfbs = math.ceil(self.brushsize / 2)
+            for i in range(-halfbs + (1 if self.brushsize % 2 else 0), halfbs):
+                for j in range(-halfbs + (1 if self.brushsize % 2 else 0), halfbs):
+                    self.deleteCell((cell[0] + i, cell[1] + j))
 
     def rightClickedCanvasCallback(self, event):
         i = math.floor(event.x / self.cellsize) - self.viewOffset[0]
@@ -338,19 +332,20 @@ class Application(tk.Frame):
         self.brushRotVar.set(f"Brush rotation: {self.brushrot}")
 
     def rotateBrushLeft(self):
-        if self.brushtype not in [BrushType.small_ship]: return
+        if self.curBrushMask == None: return
         self.brushrot -= 90
         if self.brushrot < 0:
             self.brushrot = 270
-        self.curBrushMask = rotateMatrix(rotateMatrix(self.curBrushMask))
+        self.curBrushMask = rotate(self.curBrushMask, True)
         self.updateBrushRotLabel()
 
     def rotateBrushRight(self):
-        pass
-        #self.brushrot += 90
-        #if self.brushrot >= 360:
-        #    self.brushrot = 0
-        #self.updateBrushRotLabel()
+        if self.curBrushMask == None: return
+        self.brushrot += 90
+        if self.brushrot >= 360:
+            self.brushrot = 0
+        self.curBrushMask = rotate(self.curBrushMask, False)
+        self.updateBrushRotLabel()
 
     def selectBrush(self, brush):
         self.brushtype = brush
@@ -358,13 +353,67 @@ class Application(tk.Frame):
         self.updateBrushRotLabel()
         self.curBrushMask = BrushMasks[self.brushtype.value]
 
+    def updateRules(self):
+        self.gamestate.underpopulationRule = int(self.underpopulationStringVar.get())
+        self.gamestate.overpopulationRule = int(self.overpopulationStringVar.get())
+        self.gamestate.rebornRule = int(self.rebornStringVar.get())
+
+    def quitRulesPopup(self):
+        self.showingRulesPopup = False
+        self.rulesPopup.destroy()
+
+    def setAutomataRulesPopup(self):
+        if self.showingRulesPopup: return
+        self.showingRulesPopup = True
+        self.rulesPopup = tk.Toplevel(padx=10, pady=10)
+        self.rulesPopup.attributes('-topmost', 'true')
+        self.rulesPopup.protocol("WM_DELETE_WINDOW", self.quitRulesPopup)
+
+        header = tk.Label(self.rulesPopup, text="These are the rules of life:", font='Helvetica 14 bold')
+        header.grid(row=0, column=0, sticky="W")
+
+        rulesMainFrame = tk.Frame(self.rulesPopup)
+        rulesMainFrame.grid(row=1, column=0, pady=5)
+        label1 = tk.Label(rulesMainFrame, text="A live cell dies by underpopulation when it has fewer than")
+        label1.grid(row=0, column=0, sticky="E")
+        self.underpopulationStringVar = tk.StringVar()
+        self.underpopulationStringVar.set(str(self.gamestate.underpopulationRule))
+        underpopulationEntry = tk.Entry(rulesMainFrame, textvariable=self.underpopulationStringVar, justify=tk.CENTER, width=10)
+        underpopulationEntry.grid(row=0, column=1, padx=5)
+        label2 = tk.Label(rulesMainFrame, text="neighbours.")
+        label2.grid(row=0, column=2)
+
+        label1 = tk.Label(rulesMainFrame, text="A live cell dies by overpopulation when it has more than")
+        label1.grid(row=1, column=0, sticky="E")
+        self.overpopulationStringVar = tk.StringVar()
+        self.overpopulationStringVar.set(str(self.gamestate.overpopulationRule))
+        overpopulationEntry = tk.Entry(rulesMainFrame, textvariable=self.overpopulationStringVar, justify=tk.CENTER, width=10)
+        overpopulationEntry.grid(row=1, column=1, padx=5)
+        label2 = tk.Label(rulesMainFrame, text="neighbours.")
+        label2.grid(row=1, column=2)
+
+        label1 = tk.Label(rulesMainFrame, text="A dead cell is reborn when it has exactly ")
+        label1.grid(row=2, column=0, sticky="E")
+        self.rebornStringVar = tk.StringVar()
+        self.rebornStringVar.set(str(self.gamestate.rebornRule))
+        rebornEntry = tk.Entry(rulesMainFrame, textvariable=self.rebornStringVar, justify=tk.CENTER, width=10)
+        rebornEntry.grid(row=2, column=1, padx=5)
+        label2 = tk.Label(rulesMainFrame, text="neighbours.")
+        label2.grid(row=2, column=2)
+
+        updateRulesButton = tk.Button(self.rulesPopup, text='Update rules', command=self.updateRules, width=10)
+        updateRulesButton.grid(row=2, column=0, sticky="E")
+
     ### Init ###
-    def createWidgets(self):
+    def createTopFrame(self):
         quitButton = tk.Button(self, text='Quit', command=self.quit, width=10)
         quitButton.grid(row=0, column=0, sticky="NW")
 
+        setRulesButton = tk.Button(self, text='Rules of life', command=self.setAutomataRulesPopup, width=10)
+        setRulesButton.grid(row=0, column=1, sticky="N")
+
         gameControlFrame = tk.Frame(self)
-        gameControlFrame.grid(row=0, column=1, sticky="NE")
+        gameControlFrame.grid(row=0, column=2, sticky="NE")
         startButton = tk.Button(gameControlFrame, text='Start/Pause', command=self.toggleGameUpdates, width=10)
         startButton.grid(row=0, column=0)
         stepButton = tk.Button(gameControlFrame, text='Step', command=self.manualStep, width=10)
@@ -381,7 +430,7 @@ class Application(tk.Frame):
         speedIncreaseButton.grid(row=1, column=2)
 
         stateControlFrame = tk.Frame(self)
-        stateControlFrame.grid(row=0, column=2, sticky="E")
+        stateControlFrame.grid(row=0, column=3, sticky="E")
         saveButton = tk.Button(stateControlFrame, text='Quicksave', command=self.saveState, width=10)
         saveButton.grid(row=0, column=0)
         loadButton = tk.Button(stateControlFrame, text='Load quicksave', command=self.loadState, width=10)
@@ -393,6 +442,7 @@ class Application(tk.Frame):
         loadFromFileButton = tk.Button(stateControlFrame, text='Load from file', command=self.loadStateFromFile, width=10)
         loadFromFileButton.grid(row=1, column=1)
 
+    def createCanvas(self):
         self.canvas = tk.Canvas(self, width=CANVAS_SIZE[0], height=CANVAS_SIZE[1], bg='black', bd=2, relief="groove")
         self.canvas.bind("<Button-1>", self.leftClickedCanvasCallback)
         self.canvas.bind("<Button-3>", self.rightClickedCanvasCallback)
@@ -402,10 +452,11 @@ class Application(tk.Frame):
         self.canvas.bind("<Button-5>", self.zoomOut)
         self.canvas.bind("<Key>", self.handleKey)
         self.canvas.focus_set()
-        self.canvas.grid(row=1, column=0, columnspan=3)
+        self.canvas.grid(row=1, column=0, columnspan=4)
 
+    def createBrushFrame(self):
         brushFrame = tk.Frame(self, width=50)
-        brushFrame.grid(row=1, column=3, sticky="NW")
+        brushFrame.grid(row=1, column=4, sticky="NW")
 
         brushSizeFrame = tk.Frame(brushFrame)
         brushSizeFrame.grid(row=0, column=0, sticky="NW", pady=(0, 20))
@@ -432,15 +483,58 @@ class Application(tk.Frame):
         brushTypeFrame = tk.Frame(brushFrame)
         brushTypeFrame.grid(row=2, column=0, sticky="NW")
         brushLabel = tk.Label(brushTypeFrame, text="Brushes:", anchor="w", width=20)
-        brushLabel.grid(row=0, column=0, sticky="W")
+        currow = 0
+        brushLabel.grid(row=currow, column=0, sticky="W")
         defaultBrushButton = tk.Button(brushTypeFrame, text='Default brush', command=lambda: self.selectBrush(BrushType.default), width=12)
-        defaultBrushButton.grid(row=1, column=0, columnspan=2, sticky="W")
+        currow += 1
+        defaultBrushButton.grid(row=currow, column=0, columnspan=2, sticky="W")
         plusBrushButton = tk.Button(brushTypeFrame, text='Plus', command=lambda: self.selectBrush(BrushType.plus), width=12)
-        plusBrushButton.grid(row=2, column=0, columnspan=2, sticky="W")
-        smallshipBrushButton = tk.Button(brushTypeFrame, text='Small spaceship', command=lambda: self.selectBrush(BrushType.small_ship), width=12)
-        smallshipBrushButton.grid(row=3, column=0, columnspan=2, sticky="W")
-        glidergunBrushButton = tk.Button(brushTypeFrame, text='Glider gun', command=lambda: self.selectBrush(BrushType.glider_gun), width=12)
-        glidergunBrushButton.grid(row=4, column=0, columnspan=2, sticky="W")
+        currow += 1
+        plusBrushButton.grid(row=currow, column=0, columnspan=2, sticky="W")
+        brushLabel = tk.Label(brushTypeFrame, text="Oscillators:", anchor="w", width=20)
+        currow += 1
+        brushLabel.grid(row=currow, column=0, sticky="W")
+        blinkerBrushButton = tk.Button(brushTypeFrame, text='Blinker', command=lambda: self.selectBrush(BrushType.blinker), width=12)
+        currow += 1
+        blinkerBrushButton.grid(row=currow, column=0, columnspan=2, sticky="W")
+        toadBrushButton = tk.Button(brushTypeFrame, text='Toad', command=lambda: self.selectBrush(BrushType.toad), width=12)
+        currow += 1
+        toadBrushButton.grid(row=currow, column=0, columnspan=2, sticky="W")
+        beaconBrushButton = tk.Button(brushTypeFrame, text='Beacon', command=lambda: self.selectBrush(BrushType.beacon), width=12)
+        currow += 1
+        beaconBrushButton.grid(row=currow, column=0, columnspan=2, sticky="W")
+        pulsarBrushButton = tk.Button(brushTypeFrame, text='Pulsar', command=lambda: self.selectBrush(BrushType.pulsar), width=12)
+        currow += 1
+        pulsarBrushButton.grid(row=currow, column=0, columnspan=2, sticky="W")
+        portalBrushButton = tk.Button(brushTypeFrame, text='Portal', command=lambda: self.selectBrush(BrushType.portal), width=12)
+        currow += 1
+        portalBrushButton.grid(row=currow, column=0, columnspan=2, sticky="W")
+        brushLabel = tk.Label(brushTypeFrame, text="Spaceships:", anchor="w", width=20)
+        currow += 1
+        brushLabel.grid(row=currow, column=0, sticky="W")
+        gliderBrushButton = tk.Button(brushTypeFrame, text='Glider', command=lambda: self.selectBrush(BrushType.glider), width=12)
+        currow += 1
+        gliderBrushButton.grid(row=currow, column=0, columnspan=2, sticky="W")
+        lightshipBrushButton = tk.Button(brushTypeFrame, text='Light ship', command=lambda: self.selectBrush(BrushType.light_ship), width=12)
+        currow += 1
+        lightshipBrushButton.grid(row=currow, column=0, columnspan=2, sticky="W")
+        heavyshipBrushButton = tk.Button(brushTypeFrame, text='Heavy ship', command=lambda: self.selectBrush(BrushType.heavy_ship), width=12)
+        currow += 1
+        heavyshipBrushButton.grid(row=currow, column=0, columnspan=2, sticky="W")
+        brushLabel = tk.Label(brushTypeFrame, text="Guns:", anchor="w", width=20)
+        currow += 1
+        brushLabel.grid(row=currow, column=0, sticky="W")
+        gosperGlidergunBrushButton = tk.Button(brushTypeFrame, text='Gosper glider gun', command=lambda: self.selectBrush(BrushType.gosper_glider_gun), width=12)
+        currow += 1
+        gosperGlidergunBrushButton.grid(row=currow, column=0, columnspan=2, sticky="W")
+        simkinGlidergunBrushButton = tk.Button(brushTypeFrame, text='Simkin glider gun', command=lambda: self.selectBrush(BrushType.simkin_glider_gun), width=12)
+        currow += 1
+        simkinGlidergunBrushButton.grid(row=currow, column=0, columnspan=2, sticky="W")
+
+    def createWidgets(self):
+        self.createTopFrame()
+        self.createCanvas()
+        self.createBrushFrame()
 
     ### Drawing ###
     def refreshView(self, drawGrid=True):
@@ -499,5 +593,5 @@ if __name__ == "__main__":
     root = tk.Tk()
     app = Application(root)
     app.master.title("Game of Life")
-    app.after(1000 // FPS, app.updateLoop)
+    app.after(UPDATE_FREQS[0], app.updateLoop)
     app.mainloop()
